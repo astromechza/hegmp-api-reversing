@@ -10,6 +10,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -23,6 +24,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/oauth2"
+)
+
+const (
+	oauthClientId     = "6d477c38-3ca4-4cf3-9557-2a1929a94654"
+	oauthClientSecret = "KUy49XxPzLpLuoK0xhBC77W6VXhmtQR9iQhmIFjjoY4IpxsV"
 )
 
 func main() {
@@ -30,51 +37,119 @@ func main() {
 		Level: slog.LevelDebug,
 	})))
 
-	h := &(*http.DefaultClient)
-	h.Jar, _ = cookiejar.New(&cookiejar.Options{PublicSuffixList: nil})
-	slog.Info(fmt.Sprintf("%v", h))
+	client := &(*http.DefaultClient)
+	client.Transport = &TransportWithRequestLogging{Inner: http.DefaultTransport}
+	client.Jar, _ = cookiejar.New(&cookiejar.Options{PublicSuffixList: nil})
+	slog.Info(fmt.Sprintf("%v", client))
 	baseCcApiUrl, _ := url.Parse(`https://prd.eu-ccapi.hyundai.com:8080/api/v1`)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
 	defer cancel()
 
-	stateNonce, err := oauthPrepareLogin(ctx, h, baseCcApiUrl)
-	if err != nil {
-		log.Fatal(err.Error())
+	conf := oauth2.Config{
+		ClientID:     oauthClientId,
+		ClientSecret: oauthClientSecret,
+		Scopes:       []string{},
+		RedirectURL:  baseCcApiUrl.JoinPath("user", "oauth2", "redirect").String(),
+		Endpoint: oauth2.Endpoint{
+			AuthURL:   baseCcApiUrl.JoinPath("user", "oauth2", "authorize").String(),
+			TokenURL:  baseCcApiUrl.JoinPath("user", "oauth2", "token").String(),
+			AuthStyle: oauth2.AuthStyleInParams,
+		},
 	}
 
-	authCode, err := oauthLogin(ctx, h, baseCcApiUrl, os.Getenv("EMAIL"), os.Getenv("PASSWORD"), stateNonce)
+	stateNonce2 := uuid.New().String()
+	authCodeUrl2 := conf.AuthCodeURL(stateNonce2, oauth2.SetAuthURLParam("lang", "en"))
+	slog.Info(authCodeUrl2)
+
+	authCode, err := oauth2AcceptAndLogin(ctx, client, authCodeUrl2, baseCcApiUrl.JoinPath("user", "signin").String(), os.Getenv("EMAIL"), os.Getenv("PASSWORD"), stateNonce2)
 	if err != nil {
 		log.Fatal(err.Error())
 	}
 	slog.Info("Received authorization code", "code", authCode)
+
+	ctx = context.WithValue(ctx, oauth2.HTTPClient, &http.Client{
+		Transport: &TransportWithHeadAuth{ClientId: oauthClientId, ClientSecret: oauthClientSecret, Inner: client.Transport},
+	})
+	tokens, err := conf.Exchange(ctx, authCode)
+	if err != nil {
+		log.Fatal(err.Error())
+	}
+	slog.Info("Received token", "token", tokens)
+
+	client3 := conf.Client(ctx, tokens)
+
+	req, _ := http.NewRequest(http.MethodGet, baseCcApiUrl.JoinPath("spa", "vehicles").String(), nil)
+	req.Header.Set("ccsp-service-id", oauthClientId)
+	req.Header.Set("ccsp-application-id", "014d2225-8495-4735-812d-2616334fd15d")
+
+	resp, err := client3.Do(req)
+	if err != nil {
+		log.Fatal(err.Error())
+	}
+	slog.Info("vehicles response received", "code", resp.StatusCode)
+
 }
 
-const (
-	oauthClientId = "6d477c38-3ca4-4cf3-9557-2a1929a94654"
-)
+type TransportWithHeadAuth struct {
+	ClientId     string
+	ClientSecret string
+	Inner        http.RoundTripper
+}
 
-// oauthPrepareLogin loads the initial login session and sets up the state nonce and oauth params for the
-// authorization server. This is required to set the cookies containing the oauth state.
-func oauthPrepareLogin(ctx context.Context, client *http.Client, baseUrl *url.URL) (string, error) {
-	stateNonce := uuid.New().String()
-	u := baseUrl.JoinPath("user/oauth2/authorize")
-	u.RawQuery = url.Values{
-		"response_type": []string{"code"},
-		"client_id":     []string{oauthClientId},
-		"redirect_uri":  []string{baseUrl.JoinPath("user/oauth2/redirect").String()},
-		"state":         []string{stateNonce},
-		"lang":          []string{"en"},
-	}.Encode()
-	req, err := http.NewRequest(
-		http.MethodGet,
-		u.String(),
-		nil,
-	)
+func (t *TransportWithHeadAuth) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request.Header.Get("Authorization") == "" {
+		request.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", t.ClientId, t.ClientSecret))))
+	}
+	return t.Inner.RoundTrip(request)
+}
+
+type TransportWithRequestLogging struct {
+	Inner http.RoundTripper
+}
+
+func (t *TransportWithRequestLogging) RoundTrip(req *http.Request) (*http.Response, error) {
+	var bodyCopy = []byte(``)
+	if req.Body != nil {
+		bodyCopy, _ = io.ReadAll(req.Body)
+		req.Body = io.NopCloser(bytes.NewReader(bodyCopy))
+	}
+	headers := new(bytes.Buffer)
+	_ = req.Header.Write(headers)
+	encodedHeaders := strings.TrimSpace(strings.ReplaceAll(headers.String(), "\r\n", "\n"))
+	logBody := string(bodyCopy)
+	for _, k := range []string{"PASSWORD", "EMAIL"} {
+		if v := os.Getenv(k); v != "" {
+			logBody = strings.ReplaceAll(logBody, v, "<"+k+">")
+		}
+	}
+	slog.Debug("sending http request", "method", req.Method, "url", req.URL.String(), "headers", encodedHeaders, "body", logBody)
+
+	resp, err := t.Inner.RoundTrip(req)
+	if err != nil {
+		return resp, err
+	}
+	bodyCopy = []byte(``)
+	if resp.Body != nil {
+		var err error
+		if bodyCopy, err = io.ReadAll(resp.Body); err != nil {
+			resp.Body = io.NopCloser(&errorReader{err: err})
+		} else {
+			resp.Body = io.NopCloser(bytes.NewReader(bodyCopy))
+		}
+	}
+	headers = new(bytes.Buffer)
+	_ = resp.Header.Write(headers)
+	encodedHeaders = strings.TrimSpace(strings.ReplaceAll(headers.String(), "\r\n", "\n"))
+	slog.Debug("received http response", "code", resp.StatusCode, "headers", encodedHeaders, "body", string(bodyCopy))
+	return resp, nil
+}
+
+func oauth2AcceptAndLogin(ctx context.Context, client *http.Client, prepareUrl, signinUrl, email, password, expectedStateNonce string) (string, error) {
+	req, err := http.NewRequest(http.MethodGet, prepareUrl, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
-	logHttpRequest(req)
 	if resp, err := client.Do(req.WithContext(ctx)); err != nil {
 		return "", fmt.Errorf("failed to make request: %w", err)
 	} else {
@@ -83,33 +158,20 @@ func oauthPrepareLogin(ctx context.Context, client *http.Client, baseUrl *url.UR
 				slog.Error("failed to close response body", "err", err)
 			}
 		}()
-		logHttpResponse(resp)
 		if resp.StatusCode != http.StatusOK {
 			return "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 		}
-		return stateNonce, nil
 	}
-}
 
-// oauthLogin does the actual login to the authorization server and extracts the expected redirect url from the
-// response body.
-func oauthLogin(ctx context.Context, client *http.Client, baseUrl *url.URL, email, password, expectedStateNonce string) (string, error) {
 	payload, _ := json.Marshal(map[string]interface{}{
 		"email":    email,
 		"password": password,
 	})
-	u := baseUrl.JoinPath("user", "signin")
-	req, err := http.NewRequest(
-		http.MethodPost,
-		u.String(),
-		bytes.NewBuffer(payload),
-	)
+	req, err = http.NewRequest(http.MethodPost, signinUrl, bytes.NewBuffer(payload))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-
-	logHttpRequest(req)
 	if resp, err := client.Do(req.WithContext(ctx)); err != nil {
 		return "", fmt.Errorf("failed to make request: %w", err)
 	} else {
@@ -118,7 +180,6 @@ func oauthLogin(ctx context.Context, client *http.Client, baseUrl *url.URL, emai
 				slog.Error("failed to close response body", "err", err)
 			}
 		}()
-		logHttpResponse(resp)
 		if resp.StatusCode != http.StatusOK {
 			return "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 		}
@@ -140,44 +201,10 @@ func oauthLogin(ctx context.Context, client *http.Client, baseUrl *url.URL, emai
 	}
 }
 
-func logHttpRequest(req *http.Request) {
-	var bodyCopy = []byte(``)
-	if req.Body != nil {
-		bodyCopy, _ = io.ReadAll(req.Body)
-		req.Body = io.NopCloser(bytes.NewReader(bodyCopy))
-	}
-	headers := new(bytes.Buffer)
-	_ = req.Header.Write(headers)
-	encodedHeaders := strings.TrimSpace(strings.ReplaceAll(headers.String(), "\r\n", "\n"))
-	logBody := string(bodyCopy)
-	for _, k := range []string{"PASSWORD", "EMAIL"} {
-		if v := os.Getenv(k); v != "" {
-			logBody = strings.ReplaceAll(logBody, v, "<"+k+">")
-		}
-	}
-	slog.Debug("sending http request", "method", req.Method, "url", req.URL.String(), "headers", encodedHeaders, "body", logBody)
-}
-
 type errorReader struct {
 	err error
 }
 
 func (r *errorReader) Read(p []byte) (n int, err error) {
 	return 0, r.err
-}
-
-func logHttpResponse(resp *http.Response) {
-	var bodyCopy = []byte(``)
-	if resp.Body != nil {
-		var err error
-		if bodyCopy, err = io.ReadAll(resp.Body); err != nil {
-			resp.Body = io.NopCloser(&errorReader{err: err})
-		} else {
-			resp.Body = io.NopCloser(bytes.NewReader(bodyCopy))
-		}
-	}
-	headers := new(bytes.Buffer)
-	_ = resp.Header.Write(headers)
-	encodedHeaders := strings.TrimSpace(strings.ReplaceAll(headers.String(), "\r\n", "\n"))
-	slog.Debug("received http response", "code", resp.StatusCode, "headers", encodedHeaders, "body", string(bodyCopy))
 }

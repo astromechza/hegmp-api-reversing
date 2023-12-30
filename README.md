@@ -9,4 +9,3 @@ Prior art:
 3. etc.
 
 NOTE: This is for educational and hobbyist purposes only. No commercial purpose is supported or intended.
-
