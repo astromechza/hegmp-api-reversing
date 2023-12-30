@@ -10,6 +10,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -30,6 +31,12 @@ import (
 const (
 	oauthClientId     = "6d477c38-3ca4-4cf3-9557-2a1929a94654"
 	oauthClientSecret = "KUy49XxPzLpLuoK0xhBC77W6VXhmtQR9iQhmIFjjoY4IpxsV"
+
+	appId          = "014d2225-8495-4735-812d-2616334fd15d"
+	stampCipherKey = "\x44\x5b\x68\x46\xaf\xef\x0d\x72\x66\x46\x77\x68\x65\xa6\x50" +
+		"\xc9\xf3\xa8\xb7\xb3\xab\x22\xa1\x95\x16\x3f\x7a\x89\x8d\x96" +
+		"\x2f\x7c\xb2\x1f\x96\x7f\xa5\x4b\xe5\x52\x1a\xa6\x0b\x10\xf6" +
+		"\xb7\xe0\xfa\xe5\x24"
 )
 
 func main() {
@@ -69,7 +76,15 @@ func main() {
 	slog.Info("Received authorization code", "code", authCode)
 
 	ctx = context.WithValue(ctx, oauth2.HTTPClient, &http.Client{
-		Transport: &TransportWithHeadAuth{ClientId: oauthClientId, ClientSecret: oauthClientSecret, Inner: client.Transport},
+		Transport: &TransportWithRequestModifier{
+			Modifier: func(req *http.Request) *http.Request {
+				if req.Header.Get("Authorization") == "" {
+					req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", conf.ClientID, conf.ClientSecret))))
+				}
+				return req
+			},
+			Inner: client.Transport,
+		},
 	})
 	tokens, err := conf.Exchange(ctx, authCode)
 	if err != nil {
@@ -78,11 +93,30 @@ func main() {
 	slog.Info("Received token", "token", tokens)
 
 	client3 := conf.Client(ctx, tokens)
+	client3.Transport = &TransportWithRequestModifier{
+		Modifier: func(req *http.Request) *http.Request {
+			req.Header.Set("ccsp-service-id", conf.ClientID)
+			req.Header.Set("ccsp-application-id", appId)
+			req.Header.Set("Stamp", generateStamp(appId, stampCipherKey))
+			return req
+		},
+		Inner: client3.Transport,
+	}
+
+	deviceId, err := registerForPushNotifications(ctx, client3, baseCcApiUrl, "GCM")
+	if err != nil {
+		log.Fatal(err.Error())
+	}
+
+	client3.Transport = &TransportWithRequestModifier{
+		Modifier: func(req *http.Request) *http.Request {
+			req.Header.Set("ccsp-device-id", deviceId)
+			return req
+		},
+		Inner: client3.Transport,
+	}
 
 	req, _ := http.NewRequest(http.MethodGet, baseCcApiUrl.JoinPath("spa", "vehicles").String(), nil)
-	req.Header.Set("ccsp-service-id", oauthClientId)
-	req.Header.Set("ccsp-application-id", "014d2225-8495-4735-812d-2616334fd15d")
-
 	resp, err := client3.Do(req)
 	if err != nil {
 		log.Fatal(err.Error())
@@ -91,17 +125,14 @@ func main() {
 
 }
 
-type TransportWithHeadAuth struct {
-	ClientId     string
-	ClientSecret string
-	Inner        http.RoundTripper
+type TransportWithRequestModifier struct {
+	Modifier func(req *http.Request) *http.Request
+	Inner    http.RoundTripper
 }
 
-func (t *TransportWithHeadAuth) RoundTrip(request *http.Request) (*http.Response, error) {
-	if request.Header.Get("Authorization") == "" {
-		request.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", t.ClientId, t.ClientSecret))))
-	}
-	return t.Inner.RoundTrip(request)
+func (t *TransportWithRequestModifier) RoundTrip(request *http.Request) (*http.Response, error) {
+	request = t.Modifier(request)
+	return t.Inner.RoundTrip(t.Modifier(request))
 }
 
 type TransportWithRequestLogging struct {
@@ -201,10 +232,89 @@ func oauth2AcceptAndLogin(ctx context.Context, client *http.Client, prepareUrl, 
 	}
 }
 
+// registerForPushNotifications does an initial registration as a notification channel used to power push notifications.
+func registerForPushNotifications(
+	ctx context.Context,
+	client *http.Client,
+	baseUrl *url.URL,
+	pushType string,
+) (string, error) {
+	// generate a random push notification registration id.
+	regIdBytes := make([]byte, 32)
+	_, _ = rand.Read(regIdBytes)
+	regId := fmt.Sprintf("%x", regIdBytes)
+	regUuid := uuid.New().String()
+
+	payload, _ := json.Marshal(map[string]interface{}{
+		// push type, either GCM (google cloud messaging) or APNS (apple push notification service). Apparently folks
+		// have set this separately for different car brands to get it to work but that doesn't really make much sense.
+		// some background here to investigate https://medium.com/@dilongfa/google-gcm-vs-apple-apns-c929d7769b4 but
+		// for now we are just going to copy the code for kia/hyundai EU.
+		"pushType":  pushType,
+		"pushRegId": regId,
+		"uuid":      regUuid,
+	})
+	slog.Info("Registering for push notifications", "pushType", pushType, "pushRegId", regId, "uuid", regUuid)
+	req, err := http.NewRequest(
+		http.MethodPost,
+		baseUrl.JoinPath("spa", "notifications", "register").String(),
+		bytes.NewBuffer(payload),
+	)
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+	// ==== minimum headers ====
+	// must indicate the content type - without this the receiver cannot decode it
+	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
+
+	if resp, err := client.Do(req.WithContext(ctx)); err != nil {
+		return "", fmt.Errorf("failed to make request: %w", err)
+	} else {
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		}
+
+		var out struct {
+			RetCode string `json:"retCode"`
+			ResCode string `json:"resCode"`
+			ResMsg  struct {
+				DeviceId string `json:"deviceId"`
+			} `json:"resMsg"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			return "", fmt.Errorf("failed to decode body: %w", err)
+		}
+		if out.RetCode != "S" {
+			return "", fmt.Errorf("request failed, code: %s, message: %s", out.ResCode, out.ResMsg)
+		}
+		return out.ResMsg.DeviceId, nil
+	}
+}
+
 type errorReader struct {
 	err error
 }
 
 func (r *errorReader) Read(p []byte) (n int, err error) {
 	return 0, r.err
+}
+
+func xor(plainText []byte, key []byte) []byte {
+	output := make([]byte, len(plainText))
+	for i, b := range plainText {
+		output[i] = b ^ key[i%len(key)]
+	}
+	return output
+}
+
+// generateStamp calculates an appropriate generateStamp header value for requests to the auth gateway and other API requests. This
+// is an xor of the presumably pre-shared ccspAppId and a timestamp. Presumably, it looks up the shared key by ccspAppId, checks
+// that it can xor this successfully and verify that the timestamp is within a reasonable range to prevent replay.
+func generateStamp(appId string, appKey string) string {
+	// TODO: can you change the appId?
+	return base64.StdEncoding.EncodeToString(xor(
+		[]byte(fmt.Sprintf("%s:%d", appId, time.Now().Unix())),
+		[]byte(appKey),
+	))
 }
