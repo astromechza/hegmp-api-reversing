@@ -1,0 +1,376 @@
+openapi: 3.0.0
+info:
+  title: Hyundai EU CCAPI
+  version: 1.0.0
+servers:
+  - url: https://prd.eu-ccapi.hyundai.com:8080/api/v1
+paths:
+
+  /v1/spa/notifications/register:
+    post:
+      operationId: CreatePushNotificationsDevice
+      summary: Register for a new push notifications receiver
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - pushType
+                - pushRegId
+                - uuid
+              properties:
+                pushType:
+                  description: Which type of push notifications (GCN or APNS)
+                  type: string
+                pushRegId:
+                  type: string
+                uuid:
+                  type: string
+      responses:
+        "200":
+          description: Successful request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PushNotificationsDeviceResponse'
+        default:
+          description: Failed request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/spa/vehicles:
+    get:
+      operationId: ListVehicles
+      summary: List the vehicles registered on the account
+      responses:
+        "200":
+          description: Common response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VehiclesListResponse'
+        default:
+          description: Failed request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/spa/vehicles/{vehicleId}/status:
+    get:
+      operationId: GetCurrentVehicleStatus
+      summary: Force an update and get the current vehicle status
+      parameters:
+        - name: vehicleId
+          in: path
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Common response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CurrentVehicleStatusResponse'
+        default:
+          description: Failed request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/spa/vehicles/{vehicleId}/status/latest:
+    get:
+      operationId: GetLastVehicleStatus
+      summary: Returns the last cached vehicle state
+      parameters:
+        - name: vehicleId
+          in: path
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Common response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LastVehicleStatusResponse'
+        default:
+          description: Failed request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/spa/vehicles/{vehicleId}/location:
+    get:
+      operationId: GetCurrentVehicleLocation
+      summary: Retrieve the current vehicle location
+      parameters:
+        - name: vehicleId
+          in: path
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Common response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        default:
+          description: Failed request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/spa/vehicles/{vehicleId}/tripinfo:
+    post:
+      operationId: QueryVehicleTripInfo
+      summary: Retrieve the recorded trip information for the vehicle
+      parameters:
+        - name: vehicleId
+          in: path
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - tripPeriodType
+              properties:
+                # TODO: can we make this polymorphic?
+                tripPeriodType:
+                  description: Which period to query, 0 == monthly, 1 == daily
+                  type: integer
+                setTripMonth:
+                  type: string
+                setTripDay:
+                  type: string
+      responses:
+        "200":
+          description: Common response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VehicleTripInfoResponse'
+        default:
+          description: Failed request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/spa/vehicles/{vehicleId}/drvhistory:
+    post:
+      operationId: QueryVehicleDrivingHistory
+      summary: Retrieve the recorded driving history
+      parameters:
+        - name: vehicleId
+          in: path
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - periodTarget
+              properties:
+                # TODO: can we make this polymorphic?
+                periodTarget:
+                  description: Which period to query, 0 == 30 days, 1 == all time
+                  type: integer
+      responses:
+        "200":
+          description: Common response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VehicleDrivingHistoryResponse'
+        default:
+          description: Failed request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  schemas:
+    ErrorResponse:
+      type: object
+      required:
+        - retCode
+        - resCode
+        - resMsg
+        - msgId
+      properties:
+        retCode:
+          type: string
+        resCode:
+          type: string
+        resMsg:
+          type: string
+        msgId:
+          type: string
+
+    PushNotificationsDeviceResponse:
+      type: object
+      required:
+        - retCode
+        - resCode
+        - resMsg
+        - msgId
+      properties:
+        retCode:
+          type: string
+        resCode:
+          type: string
+        resMsg:
+          type: object
+          required:
+            - deviceId
+          properties:
+            deviceId:
+              type: string
+        msgId:
+          type: string
+
+    VehiclesListResponse:
+      type: object
+      required:
+        - retCode
+        - resCode
+        - resMsg
+        - msgId
+      properties:
+        retCode:
+          type: string
+        resCode:
+          type: string
+        resMsg:
+          type: object
+          required:
+            - vehicles
+          properties:
+            vehicles:
+              type: array
+              items:
+                $ref: '#/components/schemas/VehiclesListResponseVehicle'
+        msgId:
+          type: string
+
+    VehiclesListResponseVehicle:
+      type: object
+      required:
+        - vehicleId
+        - vin
+        - vehicleName
+        - type
+        - nickname
+      properties:
+        vehicleId:
+          type: string
+        vin:
+          type: string
+        vehicleName:
+          type: string
+        type:
+          type: string
+        nickname:
+          type: string
+        year:
+          type: string
+        master:
+          type: boolean
+        carShare:
+          type: integer
+        regDate:
+          type: string
+        detailInfo:
+          type: object
+          properties:
+            inColor:
+              type: string
+            outColor:
+              type: string
+            # TODO more here
+
+    LastVehicleStatusResponse:
+      type: object
+      required:
+        - retCode
+        - resCode
+        - resMsg
+        - msgId
+      properties:
+        retCode:
+          type: string
+        resCode:
+          type: string
+        resMsg:
+          type: object
+        msgId:
+          type: string
+
+    CurrentVehicleStatusResponse:
+      type: object
+      required:
+        - retCode
+        - resCode
+        - resMsg
+        - msgId
+      properties:
+        retCode:
+          type: string
+        resCode:
+          type: string
+        resMsg:
+          type: object
+        msgId:
+          type: string
+
+    VehicleTripInfoResponse:
+      type: object
+      required:
+        - retCode
+        - resCode
+        - resMsg
+        - msgId
+      properties:
+        retCode:
+          type: string
+        resCode:
+          type: string
+        resMsg:
+          type: object
+        msgId:
+          type: string
+
+    VehicleDrivingHistoryResponse:
+      type: object
+      required:
+        - retCode
+        - resCode
+        - resMsg
+        - msgId
+      properties:
+        retCode:
+          type: string
+        resCode:
+          type: string
+        resMsg:
+          type: object
+        msgId:
+          type: string

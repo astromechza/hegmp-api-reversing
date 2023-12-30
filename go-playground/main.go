@@ -10,7 +10,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -26,18 +25,31 @@ import (
 
 	"github.com/google/uuid"
 	"golang.org/x/oauth2"
+
+	"github.com/astromechza/hegmp-api-reversing/go-playground/hyundaiclient"
 )
 
+// All the constants that a client application needs to know and has pre-registered with the Hyundai APIs.
+// Getting any of these wrong will result in requests failing since they don't match the expected state on the remote
+// end.
 const (
+	//
 	oauthClientId     = "6d477c38-3ca4-4cf3-9557-2a1929a94654"
 	oauthClientSecret = "KUy49XxPzLpLuoK0xhBC77W6VXhmtQR9iQhmIFjjoY4IpxsV"
-
-	appId          = "014d2225-8495-4735-812d-2616334fd15d"
-	stampCipherKey = "\x44\x5b\x68\x46\xaf\xef\x0d\x72\x66\x46\x77\x68\x65\xa6\x50" +
+	//
+	appId       = "014d2225-8495-4735-812d-2616334fd15d"
+	appStampKey = "\x44\x5b\x68\x46\xaf\xef\x0d\x72\x66\x46\x77\x68\x65\xa6\x50" +
 		"\xc9\xf3\xa8\xb7\xb3\xab\x22\xa1\x95\x16\x3f\x7a\x89\x8d\x96" +
 		"\x2f\x7c\xb2\x1f\x96\x7f\xa5\x4b\xe5\x52\x1a\xa6\x0b\x10\xf6" +
 		"\xb7\xe0\xfa\xe5\x24"
+	// This push type is presumably unique to the app id, since if the app id was sniffed from an android app it would be GCM, but if
+	// sniffed from an iOS app it may be APNS.
+	appNotificationPushType = "GCM"
 )
+
+func ref[k any](input k) *k {
+	return &input
+}
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
@@ -48,7 +60,8 @@ func main() {
 	client.Transport = &TransportWithRequestLogging{Inner: http.DefaultTransport}
 	client.Jar, _ = cookiejar.New(&cookiejar.Options{PublicSuffixList: nil})
 	slog.Info(fmt.Sprintf("%v", client))
-	baseCcApiUrl, _ := url.Parse(`https://prd.eu-ccapi.hyundai.com:8080/api/v1`)
+	baseCcApiUrl, _ := url.Parse(`https://prd.eu-ccapi.hyundai.com:8080/api`)
+	usersApiUrl := baseCcApiUrl.JoinPath("v1", "user")
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
 	defer cancel()
@@ -57,10 +70,10 @@ func main() {
 		ClientID:     oauthClientId,
 		ClientSecret: oauthClientSecret,
 		Scopes:       []string{},
-		RedirectURL:  baseCcApiUrl.JoinPath("user", "oauth2", "redirect").String(),
+		RedirectURL:  usersApiUrl.JoinPath("oauth2", "redirect").String(),
 		Endpoint: oauth2.Endpoint{
-			AuthURL:   baseCcApiUrl.JoinPath("user", "oauth2", "authorize").String(),
-			TokenURL:  baseCcApiUrl.JoinPath("user", "oauth2", "token").String(),
+			AuthURL:   usersApiUrl.JoinPath("oauth2", "authorize").String(),
+			TokenURL:  usersApiUrl.JoinPath("oauth2", "token").String(),
 			AuthStyle: oauth2.AuthStyleInParams,
 		},
 	}
@@ -69,7 +82,7 @@ func main() {
 	authCodeUrl2 := conf.AuthCodeURL(stateNonce2, oauth2.SetAuthURLParam("lang", "en"))
 	slog.Info(authCodeUrl2)
 
-	authCode, err := oauth2AcceptAndLogin(ctx, client, authCodeUrl2, baseCcApiUrl.JoinPath("user", "signin").String(), os.Getenv("EMAIL"), os.Getenv("PASSWORD"), stateNonce2)
+	authCode, err := oauth2AcceptAndLogin(ctx, client, authCodeUrl2, usersApiUrl.JoinPath("signin").String(), os.Getenv("EMAIL"), os.Getenv("PASSWORD"), stateNonce2)
 	if err != nil {
 		log.Fatal(err.Error())
 	}
@@ -97,32 +110,128 @@ func main() {
 		Modifier: func(req *http.Request) *http.Request {
 			req.Header.Set("ccsp-service-id", conf.ClientID)
 			req.Header.Set("ccsp-application-id", appId)
-			req.Header.Set("Stamp", generateStamp(appId, stampCipherKey))
+			req.Header.Set("Stamp", generateStamp(appId, appStampKey))
 			return req
 		},
 		Inner: client3.Transport,
 	}
 
-	deviceId, err := registerForPushNotifications(ctx, client3, baseCcApiUrl, "GCM")
+	hClient, err := hyundaiclient.NewClientWithResponses(baseCcApiUrl.String(), hyundaiclient.WithHTTPClient(client3))
 	if err != nil {
 		log.Fatal(err.Error())
 	}
 
-	client3.Transport = &TransportWithRequestModifier{
-		Modifier: func(req *http.Request) *http.Request {
-			req.Header.Set("ccsp-device-id", deviceId)
-			return req
-		},
-		Inner: client3.Transport,
-	}
-
-	req, _ := http.NewRequest(http.MethodGet, baseCcApiUrl.JoinPath("spa", "vehicles").String(), nil)
-	resp, err := client3.Do(req)
-	if err != nil {
+	if r, err := hClient.CreatePushNotificationsDeviceWithResponse(ctx, hyundaiclient.CreatePushNotificationsDeviceJSONRequestBody{
+		PushType:  appNotificationPushType,
+		PushRegId: uuid.NewString(),
+		Uuid:      uuid.NewString(),
+	}); err != nil {
 		log.Fatal(err.Error())
+	} else if r.StatusCode() != http.StatusOK {
+		if r.JSONDefault == nil {
+			log.Fatalf("request failed for unknown reason: %d %s", r.StatusCode(), string(r.Body))
+		}
+		log.Fatalf("request failed: %d %s %s", r.StatusCode(), r.JSONDefault.ResCode, r.JSONDefault.ResMsg)
+	} else {
+		deviceId := r.JSON200.ResMsg.DeviceId
+		client3.Transport = &TransportWithRequestModifier{
+			Modifier: func(req *http.Request) *http.Request {
+				req.Header.Set("ccsp-device-id", deviceId)
+				return req
+			},
+			Inner: client3.Transport,
+		}
 	}
-	slog.Info("vehicles response received", "code", resp.StatusCode)
 
+	var vehicleId string
+	if r, err := hClient.ListVehiclesWithResponse(ctx); err != nil {
+		log.Fatal(err.Error())
+	} else if r.StatusCode() != http.StatusOK {
+		if r.JSONDefault == nil {
+			log.Fatalf("request failed for unknown reason: %d %s", r.StatusCode(), string(r.Body))
+		}
+		log.Fatalf("request failed: %d %s %s", r.StatusCode(), r.JSONDefault.ResCode, r.JSONDefault.ResMsg)
+	} else {
+		encoder := json.NewEncoder(os.Stdout)
+		encoder.SetIndent("", "  ")
+		_ = encoder.Encode(r.JSON200.ResMsg.Vehicles)
+		vehicleId = r.JSON200.ResMsg.Vehicles[0].VehicleId
+	}
+
+	if r, err := hClient.GetLastVehicleStatusWithResponse(ctx, vehicleId); err != nil {
+		log.Fatal(err.Error())
+	} else if r.StatusCode() != http.StatusOK {
+		if r.JSONDefault == nil {
+			log.Fatalf("request failed for unknown reason: %d %s", r.StatusCode(), string(r.Body))
+		}
+		log.Fatalf("request failed: %d %s %s", r.StatusCode(), r.JSONDefault.ResCode, r.JSONDefault.ResMsg)
+	} else {
+		encoder := json.NewEncoder(os.Stdout)
+		encoder.SetIndent("", "  ")
+		_ = encoder.Encode(r.JSON200.ResMsg)
+	}
+
+	if r, err := hClient.QueryVehicleTripInfoWithResponse(ctx, vehicleId, hyundaiclient.QueryVehicleTripInfoJSONRequestBody{
+		TripPeriodType: 0,
+		SetTripMonth:   ref(time.Now().Format("200601")),
+	}); err != nil {
+		log.Fatal(err.Error())
+	} else if r.StatusCode() != http.StatusOK {
+		if r.JSONDefault == nil {
+			log.Fatalf("request failed for unknown reason: %d %s", r.StatusCode(), string(r.Body))
+		}
+		log.Fatalf("request failed: %d %s %s", r.StatusCode(), r.JSONDefault.ResCode, r.JSONDefault.ResMsg)
+	} else {
+		encoder := json.NewEncoder(os.Stdout)
+		encoder.SetIndent("", "  ")
+		_ = encoder.Encode(r.JSON200.ResMsg)
+	}
+
+	if r, err := hClient.QueryVehicleTripInfoWithResponse(ctx, vehicleId, hyundaiclient.QueryVehicleTripInfoJSONRequestBody{
+		TripPeriodType: 1,
+		SetTripMonth:   ref(time.Now().Format("20060102")),
+	}); err != nil {
+		log.Fatal(err.Error())
+	} else if r.StatusCode() != http.StatusOK {
+		if r.JSONDefault == nil {
+			log.Fatalf("request failed for unknown reason: %d %s", r.StatusCode(), string(r.Body))
+		}
+		log.Fatalf("request failed: %d %s %s", r.StatusCode(), r.JSONDefault.ResCode, r.JSONDefault.ResMsg)
+	} else {
+		encoder := json.NewEncoder(os.Stdout)
+		encoder.SetIndent("", "  ")
+		_ = encoder.Encode(r.JSON200.ResMsg)
+	}
+
+	if r, err := hClient.QueryVehicleDrivingHistoryWithResponse(ctx, vehicleId, hyundaiclient.QueryVehicleDrivingHistoryJSONRequestBody{
+		PeriodTarget: 0,
+	}); err != nil {
+		log.Fatal(err.Error())
+	} else if r.StatusCode() != http.StatusOK {
+		if r.JSONDefault == nil {
+			log.Fatalf("request failed for unknown reason: %d %s", r.StatusCode(), string(r.Body))
+		}
+		log.Fatalf("request failed: %d %s %s", r.StatusCode(), r.JSONDefault.ResCode, r.JSONDefault.ResMsg)
+	} else {
+		encoder := json.NewEncoder(os.Stdout)
+		encoder.SetIndent("", "  ")
+		_ = encoder.Encode(r.JSON200.ResMsg)
+	}
+
+	if r, err := hClient.QueryVehicleDrivingHistoryWithResponse(ctx, vehicleId, hyundaiclient.QueryVehicleDrivingHistoryJSONRequestBody{
+		PeriodTarget: 1,
+	}); err != nil {
+		log.Fatal(err.Error())
+	} else if r.StatusCode() != http.StatusOK {
+		if r.JSONDefault == nil {
+			log.Fatalf("request failed for unknown reason: %d %s", r.StatusCode(), string(r.Body))
+		}
+		log.Fatalf("request failed: %d %s %s", r.StatusCode(), r.JSONDefault.ResCode, r.JSONDefault.ResMsg)
+	} else {
+		encoder := json.NewEncoder(os.Stdout)
+		encoder.SetIndent("", "  ")
+		_ = encoder.Encode(r.JSON200.ResMsg)
+	}
 }
 
 type TransportWithRequestModifier struct {
@@ -229,66 +338,6 @@ func oauth2AcceptAndLogin(ctx context.Context, client *http.Client, prepareUrl, 
 		} else {
 			return v, nil
 		}
-	}
-}
-
-// registerForPushNotifications does an initial registration as a notification channel used to power push notifications.
-func registerForPushNotifications(
-	ctx context.Context,
-	client *http.Client,
-	baseUrl *url.URL,
-	pushType string,
-) (string, error) {
-	// generate a random push notification registration id.
-	regIdBytes := make([]byte, 32)
-	_, _ = rand.Read(regIdBytes)
-	regId := fmt.Sprintf("%x", regIdBytes)
-	regUuid := uuid.New().String()
-
-	payload, _ := json.Marshal(map[string]interface{}{
-		// push type, either GCM (google cloud messaging) or APNS (apple push notification service). Apparently folks
-		// have set this separately for different car brands to get it to work but that doesn't really make much sense.
-		// some background here to investigate https://medium.com/@dilongfa/google-gcm-vs-apple-apns-c929d7769b4 but
-		// for now we are just going to copy the code for kia/hyundai EU.
-		"pushType":  pushType,
-		"pushRegId": regId,
-		"uuid":      regUuid,
-	})
-	slog.Info("Registering for push notifications", "pushType", pushType, "pushRegId", regId, "uuid", regUuid)
-	req, err := http.NewRequest(
-		http.MethodPost,
-		baseUrl.JoinPath("spa", "notifications", "register").String(),
-		bytes.NewBuffer(payload),
-	)
-	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
-	}
-	// ==== minimum headers ====
-	// must indicate the content type - without this the receiver cannot decode it
-	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
-
-	if resp, err := client.Do(req.WithContext(ctx)); err != nil {
-		return "", fmt.Errorf("failed to make request: %w", err)
-	} else {
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			return "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-		}
-
-		var out struct {
-			RetCode string `json:"retCode"`
-			ResCode string `json:"resCode"`
-			ResMsg  struct {
-				DeviceId string `json:"deviceId"`
-			} `json:"resMsg"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-			return "", fmt.Errorf("failed to decode body: %w", err)
-		}
-		if out.RetCode != "S" {
-			return "", fmt.Errorf("request failed, code: %s, message: %s", out.ResCode, out.ResMsg)
-		}
-		return out.ResMsg.DeviceId, nil
 	}
 }
 
