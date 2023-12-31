@@ -86,7 +86,7 @@ paths:
   /v1/spa/vehicles/{vehicleId}/status/latest:
     get:
       operationId: GetLastVehicleStatus
-      summary: Returns the last cached vehicle state
+      summary: Returns the last cached vehicle state and location.
       parameters:
         - name: vehicleId
           in: path
@@ -121,8 +121,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: '#/components/schemas/CurrentVehicleLocationResponse'
         default:
           description: Failed request
           content:
@@ -217,13 +216,21 @@ components:
         - msgId
       properties:
         retCode:
+          description: F for failure.
           type: string
+          example: F
         resCode:
+          description: An error code.
           type: string
+          example: 40000
         resMsg:
+          description: An error message for the failure.
           type: string
+          example: An error occurred
         msgId:
+          description: A message id for this response.
           type: string
+          example: 01234567-89ab-cdef-0123-456789abcdef
 
     PushNotificationsDeviceResponse:
       type: object
@@ -243,7 +250,10 @@ components:
             - deviceId
           properties:
             deviceId:
+              description: The generated device id to use in future requests.
               type: string
+              format: uuid
+              example: 01234567-abcd-ef01-2345-6789abcdef
         msgId:
           type: string
 
@@ -265,47 +275,96 @@ components:
             - vehicles
           properties:
             vehicles:
+              description: The list of vehicles accessible on this account.
               type: array
               items:
                 $ref: '#/components/schemas/VehiclesListResponseVehicle'
+              example: []
         msgId:
           type: string
 
     VehiclesListResponseVehicle:
       type: object
       required:
-        - vehicleId
         - vin
+        - vehicleId
         - vehicleName
         - type
         - nickname
+        - year
       properties:
-        vehicleId:
-          type: string
         vin:
+          description: The VIN number of the vehicle.
           type: string
+          example: ABCDEF01234567890
+        vehicleId:
+          description: The UUID of the vehicle.
+          type: string
+          format: uuid
+          example: 01234567-abcd-ef01-2345-6789abcdef
         vehicleName:
+          description: The model of the vehicle.
           type: string
+          example: IONIQ 5
         type:
+          description: The vehicle type. EV, GN, PHEV, HV.
           type: string
+          example: EV
+        tmuNum:
+          description: Unknown.
+          type: string
+          example: "-"
         nickname:
+          description: A nickname assigned to the vehicle in the account.
           type: string
+          example: Ioniq 5
         year:
+          description: The model year of the vehicle.
           type: string
+          example: 2023
         master:
+          description: Unconfirmed, presumably indicates whether this account is the 'master' account.
           type: boolean
+          example: true
         carShare:
+          description: Unconfirmed, presumably indicates whether this vehicle is shared with other accounts.
           type: integer
+          example: 1
         regDate:
+          description: Date the vehicle was registered with Hyundai/Bluelink.
           type: string
+          example: "2023-12-12 23:59:59.123"
         detailInfo:
           type: object
           properties:
             inColor:
+              description: Interior color code of the vehicle.
               type: string
+              example: NNB
             outColor:
+              description: Exterior color code of the vehicle.
               type: string
-            # TODO more here
+              example: W3T
+            saleCarmdlCd:
+              description: Unknown.
+              type: string
+              example: GI
+            bodyType:
+              description: Unknown.
+              type: string
+              example: "2"
+            saleCarmdlEnNm:
+              description: Unconfirmed. A model name.
+              type: string
+              example: "IONIQ 5"
+        protocolType:
+          description: Unknown.
+          type: integer
+          example: 0
+        ccuCCS2ProtocolSupport:
+          description: Unknown.
+          type: integer
+          example: 0
 
     LastVehicleStatusResponse:
       type: object
@@ -321,8 +380,144 @@ components:
           type: string
         resMsg:
           type: object
+          required:
+            - vehicleStatusInfo
+          properties:
+            vehicleStatusInfo:
+              type: object
+              required:
+                - odometer
+                - vehicleLocation
+                - vehicleStatus
+              properties:
+                odometer:
+                  $ref: '#/components/schemas/StandardDistance'
+                vehicleLocation:
+                  $ref: '#/components/schemas/VehicleLocationGps'
+                vehicleStatus:
+                  $ref: '#/components/schemas/VehicleStatus'
         msgId:
           type: string
+
+    StandardDistance:
+      description: A standard distance or range measurement.
+      type: object
+      required:
+        - unit
+        - value
+      properties:
+        unit:
+          description: The unit of distance. 0 == km. 1 == miles.
+          type: integer
+          example: 1
+        value:
+          description: The scalar distance.
+          type: number
+          example: 1000
+
+    CurrentVehicleLocationResponse:
+      type: object
+      required:
+        - retCode
+        - resCode
+        - resMsg
+        - msgId
+      properties:
+        retCode:
+          type: string
+        resCode:
+          type: string
+        resMsg:
+          type: object
+          required:
+            - drvDistance
+            - gpsDetail
+          properties:
+            drvDistance:
+              type: object
+              properties:
+                type:
+                  description: Unknown.
+                  type: integer
+                  example: 2
+                rangeByFuel:
+                  type: object
+                  required:
+                    - totalAvailableRange
+                  properties:
+                    evModeRange:
+                      $ref: '#/components/schemas/StandardDistance'
+                    totalAvailableRange:
+                      $ref: '#/components/schemas/StandardDistance'
+            gpsDetail:
+              $ref: '#/components/schemas/VehicleLocationGps'
+        msgId:
+          type: string
+
+    VehicleLocationGps:
+      description: A GPS location capture. This could be the current state or the last known state.
+      type: object
+      required:
+        - accuracy
+        - coord
+        - time
+      properties:
+        accuracy:
+          type: object
+          required:
+            - hdop
+            - pdop
+          properties:
+            hdop:
+              type: integer
+              example: 10
+            pdop:
+              type: integer
+              example: 10
+        coord:
+          type: object
+          required:
+            - lat
+            - lon
+          properties:
+            alt:
+              description: Unconfirmed. Altitude in meters if known.
+              type: integer
+              example: 0
+            lat:
+              description: GPS Latitude in degrees
+              type: number
+              example: 23.000000
+            lon:
+              description: GPS Longitude in degrees
+              type: number
+              example: -5.000000
+            type:
+              description: Unknown.
+              type: integer
+              example: 0
+        head:
+          description: Compass heading in degrees.
+          type: integer
+          example: 180
+        speed:
+          type: object
+          required:
+            - unit
+            - value
+          properties:
+            unit:
+              description: The distance unit per hour. 1 == miles.
+              type: integer
+              example: 1
+            value:
+              description: The speed value.
+              type: integer
+              example: 0
+        time:
+          description: Timestamp of the location capture.
+          type: string
+          example: 20231231235959
 
     CurrentVehicleStatusResponse:
       type: object
@@ -337,9 +532,12 @@ components:
         resCode:
           type: string
         resMsg:
-          type: object
+          $ref: '#/components/schemas/VehicleStatus'
         msgId:
           type: string
+
+    VehicleStatus:
+      type: object
 
     VehicleTripInfoResponse:
       type: object

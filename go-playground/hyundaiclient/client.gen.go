@@ -14,14 +14,23 @@ import (
 	"strings"
 
 	"github.com/oapi-codegen/runtime"
+	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
-// CurrentVehicleStatusResponse defines model for CurrentVehicleStatusResponse.
-type CurrentVehicleStatusResponse struct {
+// CurrentVehicleLocationResponse defines model for CurrentVehicleLocationResponse.
+type CurrentVehicleLocationResponse struct {
 	MsgId   string                 `json:"msgId"`
 	ResCode string                 `json:"resCode"`
 	ResMsg  map[string]interface{} `json:"resMsg"`
 	RetCode string                 `json:"retCode"`
+}
+
+// CurrentVehicleStatusResponse defines model for CurrentVehicleStatusResponse.
+type CurrentVehicleStatusResponse struct {
+	MsgId   string        `json:"msgId"`
+	ResCode string        `json:"resCode"`
+	ResMsg  VehicleStatus `json:"resMsg"`
+	RetCode string        `json:"retCode"`
 }
 
 // ErrorResponse defines model for ErrorResponse.
@@ -34,10 +43,24 @@ type ErrorResponse struct {
 
 // LastVehicleStatusResponse defines model for LastVehicleStatusResponse.
 type LastVehicleStatusResponse struct {
-	MsgId   string                 `json:"msgId"`
-	ResCode string                 `json:"resCode"`
-	ResMsg  map[string]interface{} `json:"resMsg"`
-	RetCode string                 `json:"retCode"`
+	MsgId   string `json:"msgId"`
+	ResCode string `json:"resCode"`
+	ResMsg  struct {
+		VehicleStatusInfo struct {
+			Odometer struct {
+				// Unit The distance unit associated with the value. 1 == miles.
+				Unit int `json:"unit"`
+
+				// Value The distance value.
+				Value float32 `json:"value"`
+			} `json:"odometer"`
+
+			// VehicleLocation A GPS location capture. This could be the current state or the last known state.
+			VehicleLocation VehicleLocationGps `json:"vehicleLocation"`
+			VehicleStatus   VehicleStatus      `json:"vehicleStatus"`
+		} `json:"vehicleStatusInfo"`
+	} `json:"resMsg"`
+	RetCode string `json:"retCode"`
 }
 
 // PushNotificationsDeviceResponse defines model for PushNotificationsDeviceResponse.
@@ -45,7 +68,8 @@ type PushNotificationsDeviceResponse struct {
 	MsgId   string `json:"msgId"`
 	ResCode string `json:"resCode"`
 	ResMsg  struct {
-		DeviceId string `json:"deviceId"`
+		// DeviceId The generated device id to use in future requests.
+		DeviceId openapi_types.UUID `json:"deviceId"`
 	} `json:"resMsg"`
 	RetCode string `json:"retCode"`
 }
@@ -57,6 +81,43 @@ type VehicleDrivingHistoryResponse struct {
 	ResMsg  map[string]interface{} `json:"resMsg"`
 	RetCode string                 `json:"retCode"`
 }
+
+// VehicleLocationGps A GPS location capture. This could be the current state or the last known state.
+type VehicleLocationGps struct {
+	Accuracy struct {
+		Hdop int `json:"hdop"`
+		Pdop int `json:"pdop"`
+	} `json:"accuracy"`
+	Coord struct {
+		// Alt Unconfirmed. Altitude in meters if known.
+		Alt *int `json:"alt,omitempty"`
+
+		// Lat GPS Latitude in degrees
+		Lat float32 `json:"lat"`
+
+		// Lon GPS Longitude in degrees
+		Lon float32 `json:"lon"`
+
+		// Type Unknown.
+		Type *int `json:"type,omitempty"`
+	} `json:"coord"`
+
+	// Head Compass heading in degrees.
+	Head  *int `json:"head,omitempty"`
+	Speed *struct {
+		// Unit The distance unit per hour. 1 == miles.
+		Unit int `json:"unit"`
+
+		// Value The speed value.
+		Value int `json:"value"`
+	} `json:"speed,omitempty"`
+
+	// Time Timestamp of the location capture.
+	Time string `json:"time"`
+}
+
+// VehicleStatus defines model for VehicleStatus.
+type VehicleStatus = map[string]interface{}
 
 // VehicleTripInfoResponse defines model for VehicleTripInfoResponse.
 type VehicleTripInfoResponse struct {
@@ -71,6 +132,7 @@ type VehiclesListResponse struct {
 	MsgId   string `json:"msgId"`
 	ResCode string `json:"resCode"`
 	ResMsg  struct {
+		// Vehicles The list of vehicles accessible on this account.
 		Vehicles []VehiclesListResponseVehicle `json:"vehicles"`
 	} `json:"resMsg"`
 	RetCode string `json:"retCode"`
@@ -78,19 +140,57 @@ type VehiclesListResponse struct {
 
 // VehiclesListResponseVehicle defines model for VehiclesListResponseVehicle.
 type VehiclesListResponseVehicle struct {
-	CarShare   *int `json:"carShare,omitempty"`
-	DetailInfo *struct {
-		InColor  *string `json:"inColor,omitempty"`
+	// CarShare Unconfirmed, presumably indicates whether this vehicle is shared with other accounts.
+	CarShare *int `json:"carShare,omitempty"`
+
+	// CcuCCS2ProtocolSupport Unknown.
+	CcuCCS2ProtocolSupport *int `json:"ccuCCS2ProtocolSupport,omitempty"`
+	DetailInfo             *struct {
+		// BodyType Unknown.
+		BodyType *string `json:"bodyType,omitempty"`
+
+		// InColor Interior color code of the vehicle.
+		InColor *string `json:"inColor,omitempty"`
+
+		// OutColor Exterior color code of the vehicle.
 		OutColor *string `json:"outColor,omitempty"`
+
+		// SaleCarmdlCd Unknown.
+		SaleCarmdlCd *string `json:"saleCarmdlCd,omitempty"`
+
+		// SaleCarmdlEnNm Unconfirmed. A model name.
+		SaleCarmdlEnNm *string `json:"saleCarmdlEnNm,omitempty"`
 	} `json:"detailInfo,omitempty"`
-	Master      *bool   `json:"master,omitempty"`
-	Nickname    string  `json:"nickname"`
-	RegDate     *string `json:"regDate,omitempty"`
-	Type        string  `json:"type"`
-	VehicleId   string  `json:"vehicleId"`
-	VehicleName string  `json:"vehicleName"`
-	Vin         string  `json:"vin"`
-	Year        *string `json:"year,omitempty"`
+
+	// Master Unconfirmed, presumably indicates whether this account is the 'master' account.
+	Master *bool `json:"master,omitempty"`
+
+	// Nickname A nickname assigned to the vehicle in the account.
+	Nickname string `json:"nickname"`
+
+	// ProtocolType Unknown.
+	ProtocolType *int `json:"protocolType,omitempty"`
+
+	// RegDate Date the vehicle was registered with Hyundai/Bluelink.
+	RegDate *string `json:"regDate,omitempty"`
+
+	// TmuNum Unknown.
+	TmuNum *string `json:"tmuNum,omitempty"`
+
+	// Type The vehicle type. EV, GN, PHEV, HV.
+	Type string `json:"type"`
+
+	// VehicleId The UUID of the vehicle.
+	VehicleId openapi_types.UUID `json:"vehicleId"`
+
+	// VehicleName The model of the vehicle.
+	VehicleName string `json:"vehicleName"`
+
+	// Vin The VIN number of the vehicle.
+	Vin string `json:"vin"`
+
+	// Year The model year of the vehicle.
+	Year string `json:"year"`
 }
 
 // CreatePushNotificationsDeviceJSONBody defines parameters for CreatePushNotificationsDevice.
@@ -753,7 +853,7 @@ func (r QueryVehicleDrivingHistoryResponse) StatusCode() int {
 type GetCurrentVehicleLocationResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON200      *map[string]interface{}
+	JSON200      *CurrentVehicleLocationResponse
 	JSONDefault  *ErrorResponse
 }
 
@@ -1043,7 +1143,7 @@ func ParseGetCurrentVehicleLocationResponse(rsp *http.Response) (*GetCurrentVehi
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest map[string]interface{}
+		var dest CurrentVehicleLocationResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

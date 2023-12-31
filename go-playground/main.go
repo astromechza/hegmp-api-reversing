@@ -155,7 +155,7 @@ func main() {
 		encoder := json.NewEncoder(os.Stdout)
 		encoder.SetIndent("", "  ")
 		_ = encoder.Encode(r.JSON200.ResMsg.Vehicles)
-		vehicleId = r.JSON200.ResMsg.Vehicles[0].VehicleId
+		vehicleId = r.JSON200.ResMsg.Vehicles[0].VehicleId.String()
 	}
 
 	if r, err := hClient.GetLastVehicleStatusWithResponse(ctx, vehicleId); err != nil {
